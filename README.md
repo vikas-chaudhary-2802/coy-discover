@@ -112,7 +112,7 @@ tests/               discover.test.ts (domain + privacy + persistence) · api.te
 
 ## Deploying
 
-Live at https://coy-discover.vercel.app on Vercel (Mumbai region), backed by Supabase Postgres (ap-south-1).
+Live at https://coy-discover.vercel.app on Vercel, backed by Supabase Postgres (Mumbai, ap-south-1).
 `GET /api/health` reports whether the database is reachable; it returns only an error code, never the connection
 string. To deploy your own:
 
