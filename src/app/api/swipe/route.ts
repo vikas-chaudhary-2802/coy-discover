@@ -31,7 +31,7 @@ export async function POST(request: Request) {
     return errorJson("INVALID_BODY", 'Expected { profileId: string, action: "like" | "pass" }.', 400);
   }
   try {
-    return json(recordSwipe(getDb(), CURRENT_USER_ID, body.profileId, body.action));
+    return json(await recordSwipe(await getDb(), CURRENT_USER_ID, body.profileId, body.action));
   } catch (err) {
     return handleError(err);
   }

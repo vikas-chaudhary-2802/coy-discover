@@ -1,4 +1,4 @@
-import type { DB } from "./db";
+import type { DB, Queryable } from "./db";
 
 /**
  * Core Discover logic: feed, swipes and matches.
@@ -51,7 +51,7 @@ interface ProfileRow {
   photo: string;
   bio: string;
   location: string;
-  interests: string;
+  interests: string[]; // JSONB comes back already parsed
 }
 
 /** Explicit allow-list of public columns. Never add `SELECT *` here. */
@@ -65,29 +65,29 @@ function toPublic(row: ProfileRow): PublicProfile {
     photo: row.photo,
     bio: row.bio,
     location: row.location,
-    interests: JSON.parse(row.interests) as string[],
+    interests: row.interests,
   };
 }
 
+const iso = (d: Date | string) => new Date(d).toISOString();
 const orderedPair = (a: string, b: string): [string, string] => (a < b ? [a, b] : [b, a]);
 
 export const FEED_MAX_LIMIT = 50;
 
 /** Profiles the user has not swiped on yet, excluding themselves. */
-export function getFeed(db: DB, userId: string, limit = 20): PublicProfile[] {
+export async function getFeed(db: Queryable, userId: string, limit = 20): Promise<PublicProfile[]> {
   const safeLimit = Math.min(Math.max(Math.trunc(limit) || 1, 1), FEED_MAX_LIMIT);
-  const rows = db
-    .prepare(
-      `SELECT ${PUBLIC_COLUMNS}
-         FROM profiles p
-        WHERE p.id <> @userId
-          AND NOT EXISTS (
-                SELECT 1 FROM swipes s
-                 WHERE s.swiper_id = @userId AND s.target_id = p.id)
-        ORDER BY p.rank, p.id
-        LIMIT @limit`,
-    )
-    .all({ userId, limit: safeLimit }) as ProfileRow[];
+  const rows = await db.query<ProfileRow>(
+    `SELECT ${PUBLIC_COLUMNS}
+       FROM profiles p
+      WHERE p.id <> $1
+        AND NOT EXISTS (
+              SELECT 1 FROM swipes s
+               WHERE s.swiper_id = $1 AND s.target_id = p.id)
+      ORDER BY p.rank, p.id
+      LIMIT $2`,
+    [userId, safeLimit],
+  );
   return rows.map(toPublic);
 }
 
@@ -95,75 +95,73 @@ export function getFeed(db: DB, userId: string, limit = 20): PublicProfile[] {
  * Record a like or pass. If it's a like and the other person already liked
  * the user, create the match in the same transaction and return it.
  */
-export function recordSwipe(
+export async function recordSwipe(
   db: DB,
   userId: string,
   targetId: string,
   action: SwipeAction,
   now: Date = new Date(),
-): SwipeResult {
+): Promise<SwipeResult> {
   if (userId === targetId) {
     throw new DiscoverError("CANNOT_SWIPE_SELF", "You can't swipe on yourself.");
   }
 
-  // IMMEDIATE takes the write lock up front, so two concurrent swipes can't
-  // both read "no reciprocal like" and miss the match.
-  const run = db.transaction((): SwipeResult => {
-    const target = db
-      .prepare(`SELECT ${PUBLIC_COLUMNS} FROM profiles p WHERE p.id = ?`)
-      .get(targetId) as ProfileRow | undefined;
+  return db.transaction(async (tx): Promise<SwipeResult> => {
+    // Lock this pair for the rest of the transaction. Without it, if both people
+    // like each other at the same instant, each transaction could miss the other's
+    // uncommitted like and the match would never be created.
+    const [a, b] = orderedPair(userId, targetId);
+    await tx.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`${a}|${b}`]);
+
+    const [target] = await tx.query<ProfileRow>(
+      `SELECT ${PUBLIC_COLUMNS} FROM profiles p WHERE p.id = $1`,
+      [targetId],
+    );
     if (!target) throw new DiscoverError("PROFILE_NOT_FOUND", "That profile doesn't exist.");
 
-    const createdAt = now.toISOString();
-    const inserted = db
-      .prepare(
-        `INSERT INTO swipes (swiper_id, target_id, action, created_at)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT (swiper_id, target_id) DO NOTHING`,
-      )
-      .run(userId, targetId, action, createdAt);
-    if (inserted.changes === 0) {
+    const inserted = await tx.query(
+      `INSERT INTO swipes (swiper_id, target_id, action, created_at)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (swiper_id, target_id) DO NOTHING
+       RETURNING 1`,
+      [userId, targetId, action, now],
+    );
+    if (inserted.length === 0) {
       throw new DiscoverError("ALREADY_SWIPED", "You've already swiped on this profile.");
     }
 
     if (action === "pass") return { matched: false };
 
-    const likedBack = db
-      .prepare(
-        `SELECT 1 FROM swipes
-          WHERE swiper_id = ? AND target_id = ? AND action = 'like'`,
-      )
-      .get(targetId, userId);
-    if (!likedBack) return { matched: false };
+    const likedBack = await tx.query(
+      `SELECT 1 FROM swipes WHERE swiper_id = $1 AND target_id = $2 AND action = 'like'`,
+      [targetId, userId],
+    );
+    if (likedBack.length === 0) return { matched: false };
 
-    const [a, b] = orderedPair(userId, targetId);
-    db.prepare(
-      `INSERT INTO matches (user_a, user_b, created_at) VALUES (?, ?, ?)
+    await tx.query(
+      `INSERT INTO matches (user_a, user_b, created_at) VALUES ($1, $2, $3)
        ON CONFLICT (user_a, user_b) DO NOTHING`,
-    ).run(a, b, createdAt);
-
-    return { matched: true, match: { profile: toPublic(target), matchedAt: createdAt } };
+      [a, b, now],
+    );
+    return { matched: true, match: { profile: toPublic(target), matchedAt: iso(now) } };
   });
-
-  return run.immediate();
 }
 
 /** Mutual matches only, newest first. */
-export function getMatches(db: DB, userId: string): Match[] {
-  const rows = db
-    .prepare(
-      `SELECT ${PUBLIC_COLUMNS}, m.created_at AS matched_at
-         FROM matches m
-         JOIN profiles p
-           ON p.id = CASE WHEN m.user_a = @userId THEN m.user_b ELSE m.user_a END
-        WHERE (m.user_a = @userId OR m.user_b = @userId)
-          -- defence in depth: a row only counts if both likes really exist
-          AND EXISTS (SELECT 1 FROM swipes s WHERE s.swiper_id = @userId
-                         AND s.target_id = p.id AND s.action = 'like')
-          AND EXISTS (SELECT 1 FROM swipes s WHERE s.swiper_id = p.id
-                         AND s.target_id = @userId AND s.action = 'like')
-        ORDER BY m.created_at DESC, p.id`,
-    )
-    .all({ userId }) as (ProfileRow & { matched_at: string })[];
-  return rows.map((r) => ({ profile: toPublic(r), matchedAt: r.matched_at }));
+export async function getMatches(db: Queryable, userId: string): Promise<Match[]> {
+  const rows = await db.query<ProfileRow & { matched_at: Date }>(
+    `SELECT ${PUBLIC_COLUMNS}, m.created_at AS matched_at
+       FROM matches m
+       JOIN profiles p
+         ON p.id = CASE WHEN m.user_a = $1 THEN m.user_b ELSE m.user_a END
+      WHERE (m.user_a = $1 OR m.user_b = $1)
+        -- defence in depth: a row only counts if both likes really exist
+        AND EXISTS (SELECT 1 FROM swipes s WHERE s.swiper_id = $1
+                       AND s.target_id = p.id AND s.action = 'like')
+        AND EXISTS (SELECT 1 FROM swipes s WHERE s.swiper_id = p.id
+                       AND s.target_id = $1 AND s.action = 'like')
+      ORDER BY m.created_at DESC, p.id`,
+    [userId],
+  );
+  return rows.map((r) => ({ profile: toPublic(r), matchedAt: iso(r.matched_at) }));
 }

@@ -6,6 +6,8 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["tests/**/*.test.ts"],
-    env: { COY_DB_PATH: ":memory:" },
+    env: { COY_PGLITE_DIR: "memory://" },
+    testTimeout: 20_000,
+    hookTimeout: 30_000,
   },
 });

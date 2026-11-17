@@ -7,7 +7,7 @@ import { handleError, json } from "@/server/http";
 export async function GET() {
   await connection();
   try {
-    return json({ matches: getMatches(getDb(), CURRENT_USER_ID) });
+    return json({ matches: await getMatches(await getDb(), CURRENT_USER_ID) });
   } catch (err) {
     return handleError(err);
   }
