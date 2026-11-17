@@ -1,6 +1,9 @@
 # Coy · Discover
 
 A swipe-based **Discover** tab for [Coy](https://getcoy.com), built for the Coy SDE Intern assignment (Part B).
+
+**Live demo:** https://coy-discover.vercel.app (best on a phone, or a narrow browser window)
+· Health check: [/api/health](https://coy-discover.vercel.app/api/health)
 It is a standalone Next.js app with a bottom tab bar: a blank **Home** tab that stands in for Coy's existing
 experience, and the new **Discover** tab.
 
@@ -109,7 +112,9 @@ tests/               discover.test.ts (domain + privacy + persistence) · api.te
 
 ## Deploying
 
-Live on Vercel, backed by Supabase Postgres. To deploy your own:
+Live at https://coy-discover.vercel.app on Vercel (Mumbai region), backed by Supabase Postgres (ap-south-1).
+`GET /api/health` reports whether the database is reachable; it returns only an error code, never the connection
+string. To deploy your own:
 
 1. Create a Postgres database (Supabase, Neon, or anything else).
 2. Import the repo into Vercel and set `DATABASE_URL`. On Supabase, use the **Transaction pooler** connection
