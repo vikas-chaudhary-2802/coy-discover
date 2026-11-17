@@ -175,12 +175,20 @@ export function defaultPgliteDir(): string {
 // Keep one connection per server process (and across dev hot reloads).
 const globalForDb = globalThis as unknown as { __coyDb?: Promise<DB> };
 
+function openConfigured(): Promise<DB> {
+  const url = process.env.DATABASE_URL?.trim();
+  if (url) return openPostgres(url);
+  if (process.env.VERCEL) {
+    // Serverless filesystems are read-only and short-lived, so a local database can't work there.
+    return Promise.reject(
+      new Error("DATABASE_URL is not set for this deployment. Add it in Vercel and redeploy."),
+    );
+  }
+  return openPglite(defaultPgliteDir());
+}
+
 export function getDb(): Promise<DB> {
-  globalForDb.__coyDb ??= (
-    process.env.DATABASE_URL
-      ? openPostgres(process.env.DATABASE_URL)
-      : openPglite(defaultPgliteDir())
-  ).catch((err) => {
+  globalForDb.__coyDb ??= openConfigured().catch((err) => {
     globalForDb.__coyDb = undefined; // let the next request retry
     throw err;
   });
